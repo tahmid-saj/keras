@@ -20,6 +20,7 @@ import shutil
 import numpy as np
 import tensorflow.compat.v2 as tf
 
+from keras import applications
 from keras import backend
 from keras import layers
 from keras import models
@@ -430,6 +431,59 @@ class ObjectPathMappingTest(test_util.DTensorBaseTest):
         self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
         saved_path = cpt.save(os.path.join(tmpdir, "checkpoint"))
         cpt.restore(saved_path)
+
+    def test_subclass_model_object_path(self):
+        model = SubclassModel(name="model")
+        # Make sure the output is empty when weights are not initialized.
+        self.assertEmpty(layout_map_lib.model_weight_object_paths(model))
+
+        inputs = tf.zeros((10, 10))
+        model(inputs)
+        mapping = layout_map_lib.model_weight_object_paths(model)
+        self.assertEqual(
+            mapping.keys(), {"d1.kernel", "d1.bias", "d2.kernel", "d2.bias"}
+        )
+
+    def test_functional_model_object_path(self):
+        model = applications.VGG16(weights=None)
+        mapping = layout_map_lib.model_weight_object_paths(model)
+        self.assertEqual(
+            mapping.keys(),
+            {
+                "block1_conv1.bias",
+                "block1_conv1.kernel",
+                "block1_conv2.bias",
+                "block1_conv2.kernel",
+                "block2_conv1.bias",
+                "block2_conv1.kernel",
+                "block2_conv2.bias",
+                "block2_conv2.kernel",
+                "block3_conv1.bias",
+                "block3_conv1.kernel",
+                "block3_conv2.bias",
+                "block3_conv2.kernel",
+                "block3_conv3.bias",
+                "block3_conv3.kernel",
+                "block4_conv1.bias",
+                "block4_conv1.kernel",
+                "block4_conv2.bias",
+                "block4_conv2.kernel",
+                "block4_conv3.bias",
+                "block4_conv3.kernel",
+                "block5_conv1.bias",
+                "block5_conv1.kernel",
+                "block5_conv2.bias",
+                "block5_conv2.kernel",
+                "block5_conv3.bias",
+                "block5_conv3.kernel",
+                "fc1.bias",
+                "fc1.kernel",
+                "fc2.bias",
+                "fc2.kernel",
+                "predictions.bias",
+                "predictions.kernel",
+            },
+        )
 
 
 if __name__ == "__main__":

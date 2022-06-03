@@ -510,3 +510,69 @@ def _update_trackable_reference(model, lazy_init_variable_to_tf_variable_map):
 
 def _is_lazy_init_variable(obj):
     return isinstance(obj, lazy_variable.LazyInitVariable)
+
+
+def _is_tf_variable(obj):
+    return isinstance(obj, tf.Variable)
+
+
+@keras_export("keras.dtensor.experimental.model_weight_object_paths", v1=[])
+def model_weight_object_paths(model):
+    """Return the object path for all the weights in the model.
+
+    The object path (string) is the key for mapping the layout to the model
+    weights. This method will return a dict with weight object path as key
+    and the corresponding `tf.Variable` as value.
+
+    Note that if the model is a subclassed model and the weights haven't been
+    initialized, an empty dict will be returned.
+
+    Args:
+        model: `tf.keras.Model` instance.
+
+    Returns:
+        A dict with weight object paths as key and tf.Variable as value.
+    """
+    if model._is_graph_network:
+        return _functional_model_weight_object_paths(model)
+    else:
+        return _subclass_model_weight_object_paths(model)
+
+
+def _functional_model_weight_object_paths(model):
+    result = {}
+    for layer in model.layers:
+        # Note that layer name is unique among the functional/sequential model
+        # when the layer name is not provided, Keras will auto generate a layer
+        # name based on the class name.
+        layer_name = layer.name
+        for path, variable in layer._flatten(
+            predicate=_is_tf_variable, with_path=True
+        ):
+            # Note that path is a tuple that contains string and ints, eg:
+            # ('d1', '_trainable_weights', 0) maps to
+            # model.d1._trainable_weights[0]
+            if [a for a in _KERAS_ATTRIBUTES_TO_SKIP if a in path]:
+                continue
+            # Convert all the ints to string and join with .
+            object_path = ".".join([str(item) for item in path])
+            # Also attach the layer name
+            object_path = layer_name + "." + object_path
+            result[object_path] = variable
+    return result
+
+
+def _subclass_model_weight_object_paths(model):
+    result = {}
+
+    for path, variable in model._flatten(
+        predicate=_is_tf_variable, with_path=True
+    ):
+        # Note that path is a tuple that contains string and ints, eg:
+        # ('d1', '_trainable_weights', 0) maps to model.d1._trainable_weights[0]
+        if [a for a in _KERAS_ATTRIBUTES_TO_SKIP if a in path]:
+            continue
+        # Convert all the ints to string and join with .
+        object_path = ".".join([str(item) for item in path])
+        result[object_path] = variable
+    return result

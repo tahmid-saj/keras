@@ -12,4 +12,8 @@ tf_module {
     name: "layout_map_scope"
     argspec: "args=[], varargs=args, keywords=kwds, defaults=None"
   }
+  member_method {
+    name: "model_weight_object_paths"
+    argspec: "args=[\'model\'], varargs=None, keywords=None, defaults=None"
+  }
 }

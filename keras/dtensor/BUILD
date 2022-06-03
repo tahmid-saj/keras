@@ -69,6 +69,7 @@ tf_py_test(
         "//:expect_numpy_installed",
         "//:expect_tensorflow_installed",
         "//keras:backend",
+        "//keras/applications",
         "//keras/layers",
         "//keras/models",
         "//keras/utils:tf_utils",
