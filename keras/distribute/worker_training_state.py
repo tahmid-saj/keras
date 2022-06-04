@@ -28,6 +28,9 @@ from keras.distribute.distributed_file_utils import (
 )  # noqa: E501
 
 
+MAX_CHECKPOINT_TO_KEEP = 1
+
+
 def _enable_preemption_checkpoint(preemption_checkpoint_arg, strategy):
     return (
         preemption_checkpoint_arg
@@ -50,7 +53,13 @@ class WorkerTrainingState:
 
     CKPT_SAVED_BATCH_UNUSED_VALUE = -1
 
-    def __init__(self, model, checkpoint_dir, save_freq="epoch"):
+    def __init__(self,
+                 model,
+                 checkpoint_dir,
+                 save_freq="epoch",
+                 preemption_checkpoint_arg=None):
+        self._enable_preemption_checkpoint = _enable_preemption_checkpoint(
+            preemption_checkpoint_arg, model._distribution_strategy)
         self._model = model
         self._save_freq = save_freq
         # The batch and epoch at which the checkpoint is saved. Used for
@@ -75,9 +84,13 @@ class WorkerTrainingState:
         backend.set_value(
             self._ckpt_saved_batch, self.CKPT_SAVED_BATCH_UNUSED_VALUE
         )
+        self._model._callback_step = tf.Variable(
+            initial_value=tf.constant(-1, dtype=tf.int64),
+            trainable=False,
+            name="callback_step")
         # _ckpt_saved_epoch  and _ckpt_saved_batch gets tracked and is included
         # in the checkpoint file when backing up.
-        checkpoint = tf.train.Checkpoint(
+        self._checkpoint = tf.train.Checkpoint(
             model=self._model,
             ckpt_saved_epoch=self._ckpt_saved_epoch,
             ckpt_saved_batch=self._ckpt_saved_batch,
@@ -96,9 +109,9 @@ class WorkerTrainingState:
         # should restore from the same checkpoint_dir as passed in
         # read_checkpoint_manager.
         self.read_checkpoint_manager = tf.train.CheckpointManager(
-            checkpoint,
+            self._checkpoint,
             directory=os.path.join(checkpoint_dir, "chief"),
-            max_to_keep=1,
+            max_to_keep=MAX_CHECKPOINT_TO_KEEP,
         )
         write_checkpoint_dir = distributed_file_utils.write_dirpath(
             checkpoint_dir, self._model.distribute_strategy
@@ -107,8 +120,18 @@ class WorkerTrainingState:
             self.write_checkpoint_manager = self.read_checkpoint_manager
         else:
             self.write_checkpoint_manager = tf.train.CheckpointManager(
-                checkpoint, directory=write_checkpoint_dir, max_to_keep=1
+                self._checkpoint, directory=write_checkpoint_dir,
+                max_to_keep=MAX_CHECKPOINT_TO_KEEP
             )
+
+        if self._enable_preemption_checkpoint:
+            cluster_resolver = (
+                self._model.distribute_strategy.extended._cluster_resolver)
+            self.preemption_handler = (
+                tf.distribute.experimental.PreemptionCheckpointHandler(
+                    cluster_resolver, self.write_checkpoint_manager))
+            self.preemption_handler._read_checkpoint_manager = (
+                    self.read_checkpoint_manager)
 
     def back_up(self, epoch, batch=0):
         """Back up the current state of training into a checkpoint file.
@@ -118,14 +141,17 @@ class WorkerTrainingState:
           batch: The current batch(step) information to be saved.
         """
         # Save the model plus CKPT_SAVED_EPOCH and CKPT_SAVED_BATCH variable.
-        backend.set_value(self._ckpt_saved_epoch, epoch)
-        backend.set_value(self._ckpt_saved_batch, batch)
-
         if self.write_checkpoint_manager.save():
             distributed_file_utils.remove_temp_dirpath(
                 self.write_checkpoint_manager.directory,
                 self._model.distribute_strategy,
             )
+
+    def backup_if_preempted(self, batch):
+        del batch
+        if self._enable_preemption_checkpoint:
+            self.preemption_handler._run_counter += 1
+            self.preemption_handler._checkpoint_if_preempted()  # pylint: disable=protected-access
 
     def restore(self):
         """Restore the training state from the backed up checkpoint file.
@@ -135,7 +161,10 @@ class WorkerTrainingState:
           training state doesn't need to be restored, or error occurred so it
           can't.
         """
-        self.read_checkpoint_manager.restore_or_initialize()
+        # When creating the PreemptionCheckpointHandler object, we have already
+        # restored the checkpoint.
+        if not self._enable_preemption_checkpoint:
+            self.read_checkpoint_manager.restore_or_initialize()
 
     def delete_backup(self):
         """Delete the backup directories.
@@ -176,14 +205,8 @@ class WorkerTrainingState:
         epoch = backend.eval(self._ckpt_saved_epoch)
         batch = backend.eval(self._ckpt_saved_batch)
         if mode == mode_keys.ModeKeys.TRAIN:
-            if self._save_freq == "epoch":
-                if epoch >= 0:
-                    # The most recently saved epoch is one epoch prior to the
-                    # epoch it failed at, so return the value of
-                    # 'self._ckpt_saved_epoch' plus one.
-                    initial_epoch = epoch + 1
-            else:
-                if batch >= 0 and epoch >= 0:
+            if self._enable_preemption_checkpoint or self._save_freq != "epoch":
+                if batch >= 0:
                     # If the checkpoint was last saved at last batch of the
                     # epoch, return the next epoch number and batch=0
                     if batch == steps_per_epoch - 1:
@@ -193,5 +216,12 @@ class WorkerTrainingState:
                         # If the checkpoint was not last saved at last batch of
                         # the epoch, return the same epoch and next batch number
                         initial_epoch = epoch
-                        initial_step = batch + 1
+                        initial_step = batch
+            else:
+                if epoch >= 0:
+                    # The most recently saved epoch is one epoch prior to the
+                    # epoch it failed at, so return the value of
+                    # 'self._ckpt_saved_epoch' plus one.
+                    initial_epoch = epoch + 1
+
         return (initial_epoch, initial_step)

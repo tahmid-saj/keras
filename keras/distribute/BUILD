@@ -79,6 +79,7 @@ py_library(
         "//:expect_tensorflow_installed",
         "//keras:backend",
         "//keras/utils:mode_keys",
+        "//third_party/tensorflow/python/distribute/failure_handling:gce_util",
     ],
 )
 

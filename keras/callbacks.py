@@ -1769,6 +1769,13 @@ class BackupAndRestore(Callback):
     >>> len(history.history['loss'])
     6
 
+    You can also use the experimental feature of saving checkpoint upon
+    preemption/maintenance when doing distributed training with
+    `tf.distribute.MultiWorkerMirroredStrategy` on Google Cloud Platform or
+    Google Borg. See `tf.distribute.experimental.PreemptionCheckpointHandler`
+    for more details. This feature can be turned on through the
+    `preemption_checkpoint` argument.
+
     Args:
         backup_dir: String, path to store the checkpoint.
           e.g. backup_dir = os.path.join(working_dir, 'backup')
@@ -1777,13 +1784,22 @@ class BackupAndRestore(Callback):
           cannot be reused elsewhere to store other files, e.g. by
           BackupAndRestore callback of another training, or by another callback
           (ModelCheckpoint) of the same training.
-        save_freq: `'epoch'` or integer. When set to `'epoch'`
+        save_freq: `'epoch'`, integer, or `False`. When set to `'epoch'`
           the callback saves the checkpoint at the end of each epoch.
           When set to an integer, the callback saves the checkpoint every
-          `save_freq` batches.
+          `save_freq` batches. This argument can be set to `False` if you are
+          only interested in saving for preemption/maintenance by setting
+          `preemption_checkpoint`.
+        preemption_checkpoint: A boolean value instructing whether to turn on
+          the automatic checkpoint saving for preemption/maintenance event. This
+          has experimental support for
+          `tf.distribute.MultiWorkerMirroredStrategy` only for now.
     """
 
-    def __init__(self, backup_dir, save_freq="epoch"):
+    def __init__(self,
+                 backup_dir,
+                 save_freq="epoch",
+                 preemption_checkpoint=False):
         super().__init__()
         self.backup_dir = backup_dir
         self._supports_tf_logs = True
@@ -1795,6 +1811,7 @@ class BackupAndRestore(Callback):
             tf.distribute.experimental.ParameterServerStrategy,
         )
         self._save_freq = save_freq
+        self._preemption_checkpoint_arg = preemption_checkpoint
         self._batches_count = 0
         self._current_epoch = 0
 
@@ -1812,6 +1829,12 @@ class BackupAndRestore(Callback):
                     "providing `initial_epoch` in `model.fit()` for fault "
                     "tolerance."
                 )
+        if (not save_freq) and (not preemption_checkpoint):
+            raise tf.errors.InvalidArgumentError(
+              "You are using Keras BackupAndRestore callback and must turn on "
+              "at least one of the saving at set frequency (`save_freq`) or "
+              "saving at preemption/maintenance (`preemption_checkpoint`) "
+              "functionalities.")
 
         # Only the chief worker writes model checkpoints, but all workers
         # restore checkpoint at on_train_begin().
@@ -1831,13 +1854,20 @@ class BackupAndRestore(Callback):
                 "MirroredStrategy, MultiWorkerMirroredStrategy and TPUStrategy."
             )
         self.model._training_state = worker_training_state.WorkerTrainingState(
-            self.model, self.backup_dir, self._save_freq
+            self.model,
+            self.backup_dir,
+            self._save_freq,
+            self._preemption_checkpoint_arg
         )
         self._training_state = self.model._training_state
         self._training_state.restore()
 
+    def on_train_batch_begin(self, batch, logs=None):
+        self._training_state._ckpt_saved_batch.assign(batch)
+
     def on_train_batch_end(self, batch, logs=None):
-        if self._save_freq != "epoch":
+        self._training_state.backup_if_preempted(batch)
+        if self._save_freq and self._save_freq != "epoch":
             self._batches_count += 1
             if self._batches_count >= self._save_freq:
                 self._batches_count = 0
@@ -1846,7 +1876,7 @@ class BackupAndRestore(Callback):
                 )
 
     def _implements_train_batch_hooks(self):
-        return self._save_freq != "epoch"
+        return self._save_freq and self._save_freq != "epoch"
 
     def on_train_end(self, logs=None):
 
@@ -1858,6 +1888,7 @@ class BackupAndRestore(Callback):
         del self.model._training_state
 
     def on_epoch_begin(self, epoch, logs=None):
+        self._training_state._ckpt_saved_epoch.assign(epoch)
         self._current_epoch = epoch
 
     def on_epoch_end(self, epoch, logs=None):
