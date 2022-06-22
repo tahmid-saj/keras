@@ -1426,10 +1426,8 @@ class ModelCheckpoint(Callback):
 
     def on_train_begin(self, logs=None):
         if self.load_weights_on_restart:
-            filepath_to_load = (
-                self._get_most_recently_modified_file_matching_pattern(
-                    self.filepath
-                )
+            filepath_to_load = self._get_most_recently_modified_file_matching_pattern(
+                self.filepath
             )
             if filepath_to_load is not None and self._checkpoint_exists(
                 filepath_to_load
@@ -1781,9 +1779,11 @@ class BackupAndRestore(Callback):
           the callback saves the checkpoint at the end of each epoch.
           When set to an integer, the callback saves the checkpoint every
           `save_freq` batches.
+        delete_checkpoint: Boolean, default to True. If True, the checkpoint
+          will be deleted after training is finished.
     """
 
-    def __init__(self, backup_dir, save_freq="epoch"):
+    def __init__(self, backup_dir, save_freq="epoch", delete_checkpoint=True):
         super().__init__()
         self.backup_dir = backup_dir
         self._supports_tf_logs = True
@@ -1794,7 +1794,8 @@ class BackupAndRestore(Callback):
             tf.distribute.TPUStrategy,
             tf.distribute.experimental.ParameterServerStrategy,
         )
-        self._save_freq = save_freq
+        self.save_freq = save_freq
+        self.delete_checkpoint = delete_checkpoint
         self._batches_count = 0
         self._current_epoch = 0
 
@@ -1831,28 +1832,28 @@ class BackupAndRestore(Callback):
                 "MirroredStrategy, MultiWorkerMirroredStrategy and TPUStrategy."
             )
         self.model._training_state = worker_training_state.WorkerTrainingState(
-            self.model, self.backup_dir, self._save_freq
+            self.model, self.backup_dir, self.save_freq
         )
         self._training_state = self.model._training_state
         self._training_state.restore()
 
     def on_train_batch_end(self, batch, logs=None):
-        if self._save_freq != "epoch":
+        if self.save_freq != "epoch":
             self._batches_count += 1
-            if self._batches_count >= self._save_freq:
+            if self._batches_count >= self.save_freq:
                 self._batches_count = 0
                 self._training_state.back_up(
                     epoch=self._current_epoch, batch=batch
                 )
 
     def _implements_train_batch_hooks(self):
-        return self._save_freq != "epoch"
+        return self.save_freq != "epoch"
 
     def on_train_end(self, logs=None):
-
-        # On exit of training, delete the training state backup file that was
-        # saved for the purpose of worker recovery.
-        self._training_state.delete_backup()
+        if self.delete_checkpoint:
+            # On exit of training, delete the training state backup file that was
+            # saved for the purpose of worker recovery.
+            self._training_state.delete_backup()
         # Clean up the training state.
         del self._training_state
         del self.model._training_state
@@ -1862,7 +1863,7 @@ class BackupAndRestore(Callback):
 
     def on_epoch_end(self, epoch, logs=None):
         # Back up the model and current epoch for possible future recovery.
-        if self._save_freq == "epoch":
+        if self.save_freq == "epoch":
             self._training_state.back_up(epoch=epoch)
 
 
@@ -2548,8 +2549,8 @@ class TensorBoard(Callback, version_utils.TensorBoardVersionSelector):
                         embedding.metadata_path = self.embeddings_metadata
                     else:
                         if layer.name in self.embeddings_metadata.keys():
-                            embedding.metadata_path = (
-                                self.embeddings_metadata.pop(layer.name)
+                            embedding.metadata_path = self.embeddings_metadata.pop(
+                                layer.name
                             )
 
         if self.embeddings_metadata and not isinstance(
